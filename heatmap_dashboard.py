@@ -12,7 +12,7 @@ import branca.colormap as cm
 
 @st.cache_data
 def load_geojson():
-    return gpd.read_file("vic_postcodes_simplified.geojson")
+    return gpd.read_file("vic_postcodes_melbourne.geojson")
 
 @st.cache_data
 def load_data():
