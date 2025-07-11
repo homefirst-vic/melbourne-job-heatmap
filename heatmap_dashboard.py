@@ -56,7 +56,7 @@ rev_filtered_summary = filtered_rev.groupby("Location Zip").agg({
 merged_df = pd.merge(rev_filtered_summary, conv_summary, on="Postal Code", how="outer").fillna(0)
 
 # --- Load GeoJSON ---
-with open("vic-postcodes.geojson", "r") as f:
+with open("vic_postcodes_simplified.geojson", "r") as f:
     geojson = json.load(f)
 
 # --- Inject data safely into geojson ---
