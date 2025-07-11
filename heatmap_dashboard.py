@@ -74,17 +74,21 @@ tooltip_aliases = ["Postal Code:", "Revenue ($):", "Conversion Rate (%):", "Gros
 
 # --- Merge map data with GeoJSON features
 for feature in geojson["features"]:
-    pc = int(feature["properties"]["POA_CODE21"])
-    match = merged_df[merged_df["Postal Code"] == pc]
-    if not match.empty:
-        row = match.iloc[0]
-        feature["properties"]["Revenue"] = round(row["Revenue"], 2)
-        feature["properties"]["Conversion Rate"] = round(row.get("Conversion Rate", 0.0), 2)
-        feature["properties"]["Gross Margin"] = round(row["Gross Margin"], 2)
-    else:
-        feature["properties"]["Revenue"] = 0
-        feature["properties"]["Conversion Rate"] = 0
-        feature["properties"]["Gross Margin"] = 0
+    try:
+        pc = int(feature["properties"]["POA_CODE21"])
+    except:
+        pc = None
+
+    row = merged_df[merged_df["Postal Code"] == pc]
+    
+    revenue = round(row["Revenue"].values[0], 2) if not row.empty else 0.0
+    conversion = round(row["Conversion Rate"].values[0], 2) if "Conversion Rate" in row and not row.empty else 0.0
+    margin = round(row["Gross Margin"].values[0], 2) if "Gross Margin" in row and not row.empty else 0.0
+
+    feature["properties"]["Revenue"] = revenue
+    feature["properties"]["Conversion Rate"] = conversion
+    feature["properties"]["Gross Margin"] = margin
+
 
 # --- Choose data layer for choropleth
 if map_type == "Revenue":
