@@ -11,17 +11,56 @@ import branca.colormap as cm
 # ----------------------
 
 @st.cache_data
-
 def load_geojson():
     return gpd.read_file("vic_postcodes_simplified.geojson")
 
-def load_report():
-    df = pd.read_excel("Conversion Report Chat GPT.xlsx", engine="openpyxl")
-    df["POA_CODE21"] = df["POA_CODE21"].astype(str).str.strip()  # Ensure match format
-    return df
+@st.cache_data
+def load_data():
+    # Load reports
+    rev_df = pd.read_excel("Rev Report Chat GPT.xlsx", engine="openpyxl")
+    conv_df = pd.read_excel("Conversion Report Chat GPT.xlsx", engine="openpyxl")
 
+    # Clean columns
+    rev_df.columns = rev_df.columns.str.strip()
+    conv_df.columns = conv_df.columns.str.strip()
+
+    # Normalize postcodes
+    rev_df["Location Zip"] = rev_df["Location Zip"].astype(str).str.strip()
+    conv_df["Location Zip"] = conv_df["Location Zip"].astype(str).str.strip()
+
+    # Clean numeric fields
+    rev_df["Jobs Subtotal"] = pd.to_numeric(rev_df["Jobs Subtotal"], errors='coerce')
+    rev_df["Jobs Gross Margin %"] = pd.to_numeric(rev_df["Jobs Gross Margin %"], errors='coerce')
+    conv_df["Jobs Estimate Sales Subtotal"] = pd.to_numeric(conv_df["Jobs Estimate Sales Subtotal"], errors='coerce')
+
+    # Calculate conversion
+    conv_df = conv_df.dropna(subset=["Location Zip", "Jobs Estimate Sales Subtotal"])
+    conv_df["Converted"] = conv_df["Jobs Estimate Sales Subtotal"] < 101
+
+    # Aggregate
+    rev_agg = rev_df.groupby("Location Zip").agg({
+        "Jobs Subtotal": "sum",
+        "Jobs Gross Margin %": "mean",
+        "Business Unit": "first",
+        "Campaign Category": "first"
+    }).reset_index()
+    rev_agg.rename(columns={"Jobs Subtotal": "Revenue"}, inplace=True)
+
+    conv_agg = conv_df.groupby("Location Zip").agg(
+        Total_Jobs=("Converted", "count"),
+        Converted_Jobs=("Converted", "sum")
+    ).reset_index()
+    conv_agg["Conversion Rate"] = (conv_agg["Converted_Jobs"] / conv_agg["Total_Jobs"]) * 100
+
+    # Merge datasets
+    final = pd.merge(rev_agg, conv_agg[["Location Zip", "Conversion Rate"]], on="Location Zip", how="left")
+    return final, rev_df  # rev_df retained for filtering
+
+# ----------------------
+# Load all
+# ----------------------
 gdf = load_geojson()
-report_df = load_report()
+data, full_rev = load_data()
 
 # ----------------------
 # Sidebar Filters
@@ -29,33 +68,23 @@ report_df = load_report()
 
 st.sidebar.title("Filters")
 
-available_bu = sorted(report_df["Business Unit"].dropna().unique())
+available_bu = sorted(full_rev["Business Unit"].dropna().unique())
 bu_selection = st.sidebar.multiselect("Select Business Units", available_bu, default=available_bu)
 
-available_categories = sorted(report_df["Campaign Category"].dropna().unique())
+available_categories = sorted(full_rev["Campaign Category"].dropna().unique())
 category_selection = st.sidebar.multiselect("Select Campaign Categories", available_categories, default=available_categories)
 
-# ----------------------
-# Filter & Aggregate
-# ----------------------
-
-filtered_df = report_df[
-    (report_df["Business Unit"].isin(bu_selection)) &
-    (report_df["Campaign Category"].isin(category_selection))
+filtered = data[
+    (full_rev["Business Unit"].isin(bu_selection)) &
+    (full_rev["Campaign Category"].isin(category_selection))
 ]
-
-agg_df = filtered_df.groupby("POA_CODE21").agg({
-    "Revenue": "sum",
-    "Conversion Rate": "mean",
-    "Jobs Gross Margin %": "mean"
-}).reset_index()
 
 # ----------------------
 # Merge with Geo Data
 # ----------------------
-
 gdf["POA_CODE21"] = gdf["POA_CODE21"].astype(str).str.strip()
-merged = gdf.merge(agg_df, on="POA_CODE21", how="left")
+filtered["Location Zip"] = filtered["Location Zip"].astype(str).str.strip()
+merged = gdf.merge(filtered, left_on="POA_CODE21", right_on="Location Zip", how="left")
 
 # ----------------------
 # Select Metric
@@ -63,7 +92,7 @@ merged = gdf.merge(agg_df, on="POA_CODE21", how="left")
 
 st.title("Melbourne Job Heatmap Dashboard")
 
-metric = st.radio("Select Metric to Display", ["Revenue", "Conversion Rate", "Gross Margin"], horizontal=True)
+metric = st.radio("Select Metric to Display", ["Revenue", "Conversion Rate", "Jobs Gross Margin %"], horizontal=True)
 
 if metric == "Revenue":
     display_col = "Revenue"
@@ -84,7 +113,6 @@ else:
 
 m = folium.Map(location=[-37.8136, 144.9631], zoom_start=10, control_scale=True)
 
-# Add choropleth
 folium.GeoJson(
     merged,
     name="Postcodes",
