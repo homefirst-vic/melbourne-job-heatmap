@@ -3,120 +3,78 @@ import pandas as pd
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
-import json
+from folium import Choropleth
+from branca.colormap import linear
+
+# Page config
+st.set_page_config(layout="wide")
+st.title("Melbourne Job Heatmap Dashboard")
 
 # --- Load data ---
-rev_df = pd.read_excel("Rev Report Chat GPT.xlsx", engine="openpyxl")
-conv_df = pd.read_excel("Conversion Report Chat GPT.xlsx", engine="openpyxl")
+@st.cache_data
+def load_data():
+    geojson_path = "vic_postcodes_simplified.geojson"
+    jobs_df = pd.read_excel("Jobs Report Chat GPT.xlsx", engine="openpyxl")
+    gdf = gpd.read_file(geojson_path)
 
-# --- Preprocess revenue report ---
-rev_df = rev_df.dropna(subset=["Location Zip"])
-rev_df["Location Zip"] = rev_df["Location Zip"].astype(str).str.zfill(4)
-rev_df["Revenue"] = pd.to_numeric(rev_df["Jobs Subtotal"], errors="coerce")
-rev_df["Gross Margin"] = pd.to_numeric(rev_df["Jobs Gross Margin %"], errors="coerce")
+    # Ensure postcode field is int for merge
+    gdf["POA_CODE21"] = gdf["POA_CODE21"].astype(int)
+    jobs_df["Job #"] = pd.to_numeric(jobs_df["Job #"], errors="coerce")
 
-# --- Preprocess conversion report ---
-conv_df = conv_df.dropna(subset=["Location Zip"])
-conv_df["Location Zip"] = conv_df["Location Zip"].astype(str).str.zfill(4)
-conv_df["Converted"] = conv_df["Jobs Estimate Sales Subtotal"] < 101
-conv_summary = conv_df.groupby("Location Zip")["Converted"].agg(["sum", "count"])
-conv_summary["Conversion Rate"] = (conv_summary["sum"] / conv_summary["count"]) * 100
-conv_summary = conv_summary.reset_index().rename(columns={"Location Zip": "Postal Code"})
+    # Extract postcode from job report (assumes postcode is last 4 digits in Location)
+    jobs_df["Postcode"] = jobs_df["Location City"].str.extract(r"(\d{4})").astype(float)
 
-# --- Aggregate revenue and gross margin ---
-rev_summary = rev_df.groupby("Location Zip").agg({
-    "Revenue": "sum",
-    "Gross Margin": "mean"
-}).reset_index().rename(columns={"Location Zip": "Postal Code"})
+    return gdf, jobs_df
 
-# --- Merge both summaries ---
-merged_df = pd.merge(rev_summary, conv_summary, on="Postal Code", how="outer")
-merged_df = merged_df.fillna(0)
+gdf, jobs_df = load_data()
 
 # --- Sidebar filters ---
 st.sidebar.header("Filters")
-business_units = sorted(rev_df["Business Unit"].dropna().unique())
-campaigns = sorted(rev_df["Campaign Category"].dropna().unique())
 
-selected_bu = st.sidebar.multiselect("Select Business Units", business_units, default=business_units)
-selected_cc = st.sidebar.multiselect("Select Campaign Categories", campaigns, default=campaigns)
+bu_options = sorted(jobs_df["Business Unit"].dropna().unique())
+selected_bu = st.sidebar.multiselect("Select Business Units", bu_options, default=bu_options)
 
-filtered_rev = rev_df[rev_df["Business Unit"].isin(selected_bu) & rev_df["Campaign Category"].isin(selected_cc)]
+campaign_options = sorted(jobs_df["Campaign Category"].dropna().unique())
+selected_campaigns = st.sidebar.multiselect("Select Campaign Categories", campaign_options, default=campaign_options)
 
-# --- Recalculate revenue summary after filters ---
-rev_filtered_summary = filtered_rev.groupby("Location Zip").agg({
-    "Jobs Subtotal": "sum",
-    "Jobs Gross Margin %": "mean"
-}).reset_index().rename(columns={
-    "Location Zip": "Postal Code",
-    "Jobs Subtotal": "Revenue",
-    "Jobs Gross Margin %": "Gross Margin"
-})
+# --- Filtered job data ---
+filtered_jobs = jobs_df[
+    (jobs_df["Business Unit"].isin(selected_bu)) &
+    (jobs_df["Campaign Category"].isin(selected_campaigns))
+]
 
-merged_df = pd.merge(rev_filtered_summary, conv_summary, on="Postal Code", how="outer").fillna(0)
+# --- Aggregate Revenue by postcode ---
+agg = filtered_jobs.groupby("Postcode").agg({
+    "Jobs Subtotal": "sum"
+}).reset_index().rename(columns={"Jobs Subtotal": "Revenue"})
 
-# --- Load GeoJSON ---
-with open("vic_postcodes_simplified.geojson", "r") as f:
-    geojson = json.load(f)
+# Merge with GeoDataFrame
+gdf["Postcode"] = gdf["POA_CODE21"]
+merged = gdf.merge(agg, on="Postcode", how="left")
+merged["Revenue"] = merged["Revenue"].fillna(0)
 
-# --- Inject data safely into geojson ---
-for feature in geojson["features"]:
-    props = feature.get("properties", {})
-    try:
-        pc = int(props.get("POA_CODE21", 0))
-    except:
-        pc = None
+# --- Map rendering ---
+m = folium.Map(location=[-37.8136, 144.9631], zoom_start=9, tiles="cartodbpositron")
 
-    row = merged_df[merged_df["Postal Code"] == str(pc).zfill(4)]
+# Create color scale
+colormap = linear.YlGnBu_09.scale(merged["Revenue"].min(), merged["Revenue"].max())
+colormap.caption = "Revenue ($)"
 
-    revenue = round(float(row["Revenue"].values[0]), 2) if not row.empty and "Revenue" in row else 0.0
-    conversion = round(float(row["Conversion Rate"].values[0]), 2) if not row.empty and "Conversion Rate" in row else 0.0
-    margin = round(float(row["Gross Margin"].values[0]), 2) if not row.empty and "Gross Margin" in row else 0.0
-
-    props["Revenue"] = revenue
-    props["Conversion Rate"] = conversion
-    props["Gross Margin"] = margin
-    feature["properties"] = props
-
-# --- Streamlit UI ---
-st.title("Melbourne Job Heatmap Dashboard")
-
-layer_option = st.radio("Select Metric to Display", ["Revenue", "Conversion Rate", "Gross Margin"], horizontal=True)
-
-# --- Create Folium map ---
-m = folium.Map(location=[-37.8136, 144.9631], zoom_start=10, control_scale=True)
-
-# --- Color scale settings ---
-if layer_option == "Revenue":
-    key = "Revenue"
-    colormap = folium.LinearColormap(colors=["#ffffcc", "#41b6c4", "#253494"], vmin=merged_df["Revenue"].min(), vmax=merged_df["Revenue"].max(), caption="Revenue ($)")
-elif layer_option == "Conversion Rate":
-    key = "Conversion Rate"
-    colormap = folium.LinearColormap(colors=["#fee5d9", "#fcae91", "#cb181d"], vmin=0, vmax=100, caption="Conversion Rate (%)")
-else:
-    key = "Gross Margin"
-    colormap = folium.LinearColormap(colors=["#f7fcf5", "#74c476", "#00441b"], vmin=0, vmax=100, caption="Gross Margin (%)")
-
-style_function = lambda feature: {
-    'fillColor': colormap(feature['properties'][key]),
-    'color': 'black',
-    'weight': 0.5,
-    'fillOpacity': 0.7,
-}
-
-tooltip = folium.GeoJsonTooltip(
-    fields=["POA_CODE21", "Revenue", "Conversion Rate", "Gross Margin"],
-    aliases=["Postcode", "Revenue ($)", "Conversion Rate (%)", "Gross Margin (%)"],
-    localize=True
-)
-
-folium.GeoJson(
-    geojson,
-    name="Postcodes",
-    style_function=style_function,
-    tooltip=tooltip
+# Add Choropleth layer
+Choropleth(
+    geo_data=merged,
+    name="choropleth",
+    data=merged,
+    columns=["Postcode", "Revenue"],
+    key_on="feature.properties.Postcode",
+    fill_color="YlGnBu",
+    fill_opacity=0.7,
+    line_opacity=0.2,
+    legend_name="Revenue ($)",
+    highlight=True
 ).add_to(m)
 
 colormap.add_to(m)
 
-st_data = st_folium(m, width=1100, height=650)
+st_folium(m, width=1100, height=650)
+
