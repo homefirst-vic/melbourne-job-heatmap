@@ -75,8 +75,8 @@ available_categories = sorted(full_rev["Campaign Category"].dropna().unique())
 category_selection = st.sidebar.multiselect("Select Campaign Categories", available_categories, default=available_categories)
 
 filtered = data[
-    (full_rev["Business Unit"].isin(bu_selection)) &
-    (full_rev["Campaign Category"].isin(category_selection))
+    data["Business Unit"].isin(bu_selection) &
+    data["Campaign Category"].isin(category_selection)
 ]
 
 # ----------------------
@@ -131,5 +131,10 @@ folium.GeoJson(
 
 color_scale.caption = legend_label
 color_scale.add_to(m)
+m.get_root().html.add_child(folium.Element("""
+<style>
+  .legend { max-width: 180px !important; right: 10px !important; }
+</style>
+"""))
 
 st_folium(m, width=1100, height=650)
