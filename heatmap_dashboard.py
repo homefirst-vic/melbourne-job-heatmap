@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
-from folium import Choropleth
+from folium import Choropleth, GeoJson
 from branca.colormap import linear
 
 # Page config
@@ -17,12 +17,13 @@ def load_data():
     jobs_df = pd.read_excel("Jobs Report Chat GPT.xlsx", engine="openpyxl")
     gdf = gpd.read_file(geojson_path)
 
-    # Ensure postcode field is int for merge
+    # Ensure matching dtype
     gdf["POA_CODE21"] = gdf["POA_CODE21"].astype(int)
-    jobs_df["Job #"] = pd.to_numeric(jobs_df["Job #"], errors="coerce")
+    gdf["Postcode"] = gdf["POA_CODE21"].astype(str)
 
-    # Extract postcode from job report (assumes postcode is last 4 digits in Location)
-    jobs_df["Postcode"] = jobs_df["Location City"].str.extract(r"(\d{4})").astype(float)
+    # Extract postcode from location string if needed
+    jobs_df["Postcode"] = jobs_df["Location City"].str.extract(r"(\d{4})")
+    jobs_df["Postcode"] = jobs_df["Postcode"].astype(str)
 
     return gdf, jobs_df
 
@@ -43,38 +44,46 @@ filtered_jobs = jobs_df[
     (jobs_df["Campaign Category"].isin(selected_campaigns))
 ]
 
-# --- Aggregate Revenue by postcode ---
+# --- Aggregate Revenue by Postcode ---
 agg = filtered_jobs.groupby("Postcode").agg({
     "Jobs Subtotal": "sum"
 }).reset_index().rename(columns={"Jobs Subtotal": "Revenue"})
 
-# Merge with GeoDataFrame
-gdf["Postcode"] = gdf["POA_CODE21"]
+# Merge with geodata
 merged = gdf.merge(agg, on="Postcode", how="left")
 merged["Revenue"] = merged["Revenue"].fillna(0)
 
-# --- Map rendering ---
+# --- Create Map ---
 m = folium.Map(location=[-37.8136, 144.9631], zoom_start=9, tiles="cartodbpositron")
 
-# Create color scale
-colormap = linear.YlGnBu_09.scale(merged["Revenue"].min(), merged["Revenue"].max())
+# Colormap
+min_rev = merged["Revenue"].min()
+max_rev = merged["Revenue"].max()
+colormap = linear.YlOrRd_09.scale(min_rev, max_rev)
 colormap.caption = "Revenue ($)"
-
-# Add Choropleth layer
-Choropleth(
-    geo_data=merged,
-    name="choropleth",
-    data=merged,
-    columns=["Postcode", "Revenue"],
-    key_on="feature.properties.Postcode",
-    fill_color="YlGnBu",
-    fill_opacity=0.7,
-    line_opacity=0.2,
-    legend_name="Revenue ($)",
-    highlight=True
-).add_to(m)
-
 colormap.add_to(m)
 
-st_folium(m, width=1100, height=650)
+# Add Choropleth manually with hover tooltip
+def style_function(feature):
+    rev = feature["properties"].get("Revenue", 0)
+    return {
+        "fillOpacity": 0.7,
+        "weight": 0.5,
+        "color": "black",
+        "fillColor": colormap(rev),
+    }
 
+tooltip = folium.GeoJsonTooltip(
+    fields=["Postcode", "Revenue"],
+    aliases=["Postcode:", "Revenue ($):"],
+    localize=True
+)
+
+GeoJson(
+    merged,
+    name="Revenue",
+    style_function=style_function,
+    tooltip=tooltip
+).add_to(m)
+
+st_folium(m, width=1100, height=650)
